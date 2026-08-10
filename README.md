@@ -93,10 +93,12 @@ Also confirm **Block Public Access** settings are not blocking bucket policies, 
 
 ## Step 2 — Create an IAM User with Least-Privilege Access
 
-Avoid using root credentials or broad `AmazonS3FullAccess`. Scope permissions to exactly what the pipeline needs.
+Add root credentials or broad `AmazonS3FullAccess`. Scope permissions to exactly what the pipeline needs.
+
+or you can add the permission using inline policy
 
 1. **IAM → Users → Create user**
-   - Name: `github-actions-deployer`
+   - Name: `github-actions-deployer` #
    - Access type: Programmatic access (no console login needed)
 
 2. Attach an **inline policy**:
