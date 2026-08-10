@@ -1,107 +1,71 @@
-# DevOps Practice Notes — Static Website CI/CD on AWS S3
+# Deploying a Static Website to AWS S3 with GitHub Actions (CI/CD)
 
-Personal reference documentation: deploying a static website to AWS S3 with an automated CI/CD pipeline using GitHub Actions.
-
----
-
-## 📑 Table of Contents
-1. [Launch an AWS Machine (EC2 + Key Pair)](#1-launch-an-aws-machine-ec2--key-pair)
-2. [Create IAM User & Permissions](#2-create-iam-user--permissions)
-3. [Create S3 Bucket](#3-create-s3-bucket)
-4. [Configure AWS CLI](#4-configure-aws-cli)
-5. [Configure Static Website Hosting on S3](#5-configure-static-website-hosting-on-s3)
-6. [Create GitHub Repository](#6-create-github-repository)
-7. [Set AWS Credentials as GitHub Secrets](#7-set-aws-credentials-as-github-secrets)
-8. [Write the GitHub Actions Workflow (Explained)](#8-write-the-github-actions-workflow-explained)
-9. [Troubleshooting](#9-troubleshooting)
-10. [Next Steps](#10-next-steps)
+A complete, production-style guide for automatically deploying a static website to Amazon S3 whenever code is pushed to GitHub.
 
 ---
 
-## 1. Launch an AWS Machine (EC2 + Key Pair)
+## Table of Contents
 
-> This step is **optional** — only needed if you want a Linux server (e.g. to test builds, host tools, or practice server administration alongside S3). If you're only deploying static files to S3, you can skip straight to Step 2.
+1. [Overview](#overview)
+2. [Architecture](#architecture)
+3. [Prerequisites](#prerequisites)
+4. [Step 1 — Configure the S3 Bucket](#step-1--configure-the-s3-bucket)
+5. [Step 2 — Create an IAM User with Least-Privilege Access](#step-2--create-an-iam-user-with-least-privilege-access)
+6. [Step 3 — Store Credentials as GitHub Secrets](#step-3--store-credentials-as-github-secrets)
+7. [Step 4 — Create the GitHub Actions Workflow](#step-4--create-the-github-actions-workflow)
+8. [Step 5 — Deploy and Verify](#step-5--deploy-and-verify)
+9. [Optional: CloudFront Cache Invalidation](#optional-cloudfront-cache-invalidation)
+10. [Security Best Practices](#security-best-practices)
+11. [Troubleshooting](#troubleshooting)
 
-### 1.1 Create a Key Pair (for SSH access)
-1. AWS Console → **EC2 → Key Pairs → Create key pair**
-2. Name: `devops-practice-key`
-3. Type: `RSA`, Format: `.pem` (for Linux/Mac) or `.ppk` (for PuTTY on Windows)
-4. Click **Create** — the private key file downloads automatically. **Save it securely; AWS will not let you download it again.**
-5. Set correct permissions locally so SSH accepts it:
-   ```bash
-   chmod 400 devops-practice-key.pem
-   ```
+---
 
-### 1.2 Launch the EC2 Instance (AMI)
-1. AWS Console → **EC2 → Launch Instance**
-2. **Name:** `devops-practice-server`
-3. **AMI (Amazon Machine Image):** choose `Amazon Linux 2023` or `Ubuntu 22.04 LTS` (free-tier eligible)
-4. **Instance type:** `t2.micro` (free-tier eligible)
-5. **Key pair:** select the key pair created in Step 1.1
-6. **Network settings:** allow inbound `SSH (22)` from your IP, and `HTTP (80)` / `HTTPS (443)` if the instance will serve web traffic
-7. Click **Launch Instance**
+## Overview
 
-### 1.3 Connect to the Instance
-```bash
-ssh -i devops-practice-key.pem ec2-user@<EC2_PUBLIC_IP>
+This guide sets up a CI/CD pipeline where:
+
+> **Push to `main` branch → GitHub Actions triggers → Files sync to S3 automatically**
+
+No manual uploads, no local AWS CLI commands — every merge to `main` becomes a live deployment.
+
+---
+
+## Architecture
+
+```
+┌─────────────┐      push      ┌──────────────────┐      sync      ┌─────────────┐
+│  Developer  │ ─────────────▶ │  GitHub Actions   │ ─────────────▶ │   S3 Bucket  │
+│  (git push) │                │     Workflow       │                │ (static site)│
+└─────────────┘                └──────────────────┘                └─────────────┘
+                                                                            │
+                                                                            ▼
+                                                                    ┌─────────────┐
+                                                                    │   End Users  │
+                                                                    └─────────────┘
 ```
 
 ---
 
-## 2. Create IAM User & Permissions
+## Prerequisites
 
-This IAM user is what **GitHub Actions** will use to authenticate with AWS and upload files to S3. Never use your AWS root account for this.
-
-### 2.1 Create the User
-1. AWS Console → **IAM → Users → Create user**
-2. Username: `github-actions-deployer`
-3. **Do not** enable AWS Management Console access (this user only needs programmatic/API access)
-
-### 2.2 Attach a Scoped Permission Policy
-Rather than attaching a broad policy like `AmazonS3FullAccess`, create an inline policy scoped to only your bucket — this follows the **principle of least privilege**, a core DevOps/security practice.
-
-**IAM → Users → github-actions-deployer → Add permissions → Create inline policy → JSON:**
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "AllowS3DeployAccess",
-      "Effect": "Allow",
-      "Action": [
-        "s3:PutObject",
-        "s3:GetObject",
-        "s3:ListBucket",
-        "s3:DeleteObject"
-      ],
-      "Resource": [
-        "arn:aws:s3:::YOUR_BUCKET_NAME",
-        "arn:aws:s3:::YOUR_BUCKET_NAME/*"
-      ]
-    }
-  ]
-}
-```
-Replace `YOUR_BUCKET_NAME` with your actual bucket name. Name the policy `S3DeployPolicy` and save.
-
-### 2.3 Generate an Access Key
-1. Go to the user → **Security credentials** tab → **Create access key**
-2. Use case: **"Application running outside AWS"**
-3. Copy the **Access Key ID** and **Secret Access Key** — the secret is shown only once. Store both temporarily; they'll go into GitHub Secrets in Step 7.
+| Requirement | Notes |
+|---|---|
+| AWS Account | With permissions to create IAM users/policies |
+| S3 Bucket | Already created and configured for static website hosting |
+| GitHub Repository | Contains your website source files |
+| AWS CLI (optional) | Useful for local testing before automating |
 
 ---
 
-## 3. Create S3 Bucket
+## Step 1 — Configure the S3 Bucket
 
-1. AWS Console → **S3 → Create bucket**
-2. **Bucket name:** must be globally unique, e.g. `my-devops-practice-site-2026`
-3. **Region:** choose one close to you (e.g. `ap-southeast-1`)
-4. **Block Public Access settings:** **uncheck** "Block all public access" (a static website bucket must be publicly readable) — acknowledge the warning checkbox
-5. Leave other settings as default → **Create bucket**
-
-### 3.1 Add a Bucket Policy (Public Read Access)
-Go to the bucket → **Permissions → Bucket Policy** and add:
+1. Open **S3 → your bucket → Properties**
+2. Scroll to **Static website hosting** → **Edit**
+3. Enable it, set:
+   - **Index document:** `index.html`
+   - **Error document:** `error.html` (optional but recommended)
+4. Save, and note the **Bucket website endpoint** shown — this is your live URL
+5. Under **Permissions → Bucket policy**, allow public read access (skip this if using CloudFront with Origin Access Control instead):
 
 ```json
 {
@@ -118,113 +82,87 @@ Go to the bucket → **Permissions → Bucket Policy** and add:
 }
 ```
 
-> This makes every object in the bucket publicly readable — correct for a public static website, but never do this on a bucket holding private/sensitive data.
+Also confirm **Block Public Access** settings are not blocking bucket policies, if you intend the site to be public.
 
 ---
 
-## 4. Configure AWS CLI
+## Step 2 — Create an IAM User with Least-Privilege Access
 
-Installing and configuring the AWS CLI lets you manage AWS from your terminal — useful for testing uploads manually before automating them in GitHub Actions.
+Avoid using root credentials or broad `AmazonS3FullAccess`. Scope permissions to exactly what the pipeline needs.
 
-### 4.1 Install
-```bash
-# Linux
-curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-unzip awscliv2.zip
-sudo ./aws/install
+1. **IAM → Users → Create user**
+   - Name: `github-actions-deployer`
+   - Access type: Programmatic access (no console login needed)
 
-# macOS
-brew install awscli
+2. Attach an **inline policy**:
 
-# Verify
-aws --version
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowS3DeploySync",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::YOUR_BUCKET_NAME",
+        "arn:aws:s3:::YOUR_BUCKET_NAME/*"
+      ]
+    }
+  ]
+}
 ```
 
-### 4.2 Configure Credentials
-```bash
-aws configure
-```
-You'll be prompted for:
-```
-AWS Access Key ID [None]: <your access key from Step 2.3>
-AWS Secret Access Key [None]: <your secret key from Step 2.3>
-Default region name [None]: ap-southeast-1
-Default output format [None]: json
-```
+3. Go to **Security credentials → Create access key**
+   - Use case: *Application running outside AWS*
+4. Copy the **Access Key ID** and **Secret Access Key** — the secret is shown only once
 
-This saves credentials to `~/.aws/credentials` and config to `~/.aws/config`. Test it:
-```bash
-aws s3 ls
-```
-If it lists your bucket(s) without error, the CLI is correctly configured.
+> 🔐 **Recommended upgrade:** Once this pipeline works, migrate to **OpenID Connect (OIDC)**, which lets GitHub Actions assume an IAM role without storing any long-lived AWS keys at all. See [Security Best Practices](#security-best-practices).
 
 ---
 
-## 5. Configure Static Website Hosting on S3
+## Step 3 — Store Credentials as GitHub Secrets
 
-1. Go to your bucket → **Properties** tab → scroll to **Static website hosting** → **Edit**
-2. Select **Enable**
-3. **Hosting type:** "Host a static website"
-4. **Index document:** `index.html`
-5. **Error document:** `error.html` (optional but recommended)
-6. Save — AWS gives you a **bucket website endpoint URL**, e.g.:
-   ```
-   http://YOUR_BUCKET_NAME.s3-website-ap-southeast-1.amazonaws.com
-   ```
-7. Upload a test `index.html` and open the endpoint URL to confirm it loads
+In your repository: **Settings → Secrets and variables → Actions → New repository secret**
 
----
+| Secret Name | Example Value |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | `AKIAxxxxxxxxxxxxxxxx` |
+| `AWS_SECRET_ACCESS_KEY` | `wJalrxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
+| `AWS_REGION` | `ap-southeast-1` |
+| `S3_BUCKET_NAME` | `my-static-site-bucket` |
 
-## 6. Create GitHub Repository
-
-1. Go to [github.com](https://github.com) → **New repository**
-2. Name it, e.g. `s3-static-site-cicd`
-3. Add your website files (`index.html`, `style.css`, etc.) to the repo, or push an existing local project:
-   ```bash
-   git init
-   git add .
-   git commit -m "Initial website files"
-   git branch -M main
-   git remote add origin https://github.com/<your-username>/<repo-name>.git
-   git push -u origin main
-   ```
+Never commit these values directly into your repository or workflow file.
 
 ---
 
-## 7. Set AWS Credentials as GitHub Secrets
+## Step 4 — Create the GitHub Actions Workflow
 
-GitHub Actions needs the IAM user's credentials to authenticate with AWS — but they must **never** be hardcoded in the workflow file. Store them as encrypted repository secrets instead.
-
-**Where:** Repo → **Settings → Secrets and variables → Actions → New repository secret**
-
-| Secret name | Value | Source |
-|---|---|---|
-| `AWS_ACCESS_KEY_ID` | Access key | Step 2.3 |
-| `AWS_SECRET_ACCESS_KEY` | Secret key | Step 2.3 |
-| `AWS_REGION` | e.g. `ap-southeast-1` | Step 3 |
-| `S3_BUCKET_NAME` | Your bucket name | Step 3 |
-
-These are encrypted at rest by GitHub and only exposed to workflow runs as environment variables — never visible in logs (GitHub automatically masks them).
-
----
-
-## 8. Write the GitHub Actions Workflow (Explained)
-
-Create the file `.github/workflows/deploy.yml` in your repo:
+Create the file: `.github/workflows/deploy.yml`
 
 ```yaml
-name: Deploy to S3
+name: Deploy Static Site to S3
 
 on:
   push:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
+    name: Build and Deploy
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
@@ -239,65 +177,93 @@ jobs:
           aws s3 sync . s3://${{ secrets.S3_BUCKET_NAME }} \
             --delete \
             --exclude ".git/*" \
-            --exclude ".github/*"
+            --exclude ".github/*" \
+            --exclude "README.md"
 ```
 
-### Line-by-line explanation
+### Notes on the workflow
+- `--delete` removes files from S3 that no longer exist in the repo (keeps bucket in sync)
+- `--exclude` prevents repo metadata (`.git`, `.github`, README) from being uploaded to the live site
+- If your site's files live in a subfolder (e.g. a `dist/` or `build/` output), change the sync source:
+  ```yaml
+  run: aws s3 sync ./dist s3://${{ secrets.S3_BUCKET_NAME }} --delete
+  ```
 
-| Section | What it does |
-|---|---|
-| `name: Deploy to S3` | Display name of the workflow, shown in the GitHub Actions tab |
-| `on: push: branches: [main]` | Trigger condition — this workflow runs automatically every time code is pushed to `main` |
-| `jobs: deploy:` | Defines a job named `deploy` (you can have multiple jobs; this workflow has one) |
-| `runs-on: ubuntu-latest` | GitHub spins up a fresh Ubuntu virtual machine to run the job's steps |
-| **Step 1** `actions/checkout@v4` | Official GitHub action that clones your repo's code onto the runner, so later steps can access the files |
-| **Step 2** `aws-actions/configure-aws-credentials@v4` | Official AWS action that reads the three secrets and configures the AWS CLI on the runner, so subsequent `aws` commands are authenticated |
-| **Step 3** `aws s3 sync . s3://...` | The actual deployment command — see below |
+---
 
-### Breaking down the `aws s3 sync` command
+## Step 5 — Deploy and Verify
+
 ```bash
-aws s3 sync . s3://${{ secrets.S3_BUCKET_NAME }} --delete --exclude ".git/*" --exclude ".github/*"
+git add .github/workflows/deploy.yml
+git commit -m "ci: add S3 deployment workflow"
+git push origin main
 ```
-- `aws s3 sync . s3://BUCKET` — uploads only **new or changed** files from the current directory (`.`) to the bucket (much faster than re-uploading everything every time)
-- `--delete` — removes files from the S3 bucket that no longer exist in the repo, keeping the bucket an exact mirror of your repo
-- `--exclude ".git/*"` — don't upload git's internal metadata folder
-- `--exclude ".github/*"` — don't upload the workflow files themselves to the website bucket
 
-> If your site's files live in a subfolder (e.g. a build output folder like `dist/` or `build/`), change `.` to that path: `aws s3 sync ./dist s3://...`
-
-### Verifying it works
-1. Commit and push the workflow file:
-   ```bash
-   git add .github/workflows/deploy.yml
-   git commit -m "Add CI/CD workflow for S3 deployment"
-   git push origin main
-   ```
-2. Go to the repo's **Actions** tab — you'll see the workflow running (yellow), then passing (green) or failing (red)
-3. Visit your S3 website endpoint URL to confirm the update appeared
+1. Go to your repo's **Actions** tab
+2. Watch the `Deploy Static Site to S3` workflow run
+3. On success, open your **S3 static website endpoint** and confirm the changes are live
 
 ---
 
-## 9. Troubleshooting
+## Optional: CloudFront Cache Invalidation
 
-| Problem | Likely Cause |
+If a CloudFront distribution sits in front of the bucket (recommended for HTTPS + caching + custom domain), add this step so users see updates immediately instead of waiting for the cache to expire:
+
+```yaml
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*"
+```
+
+Add `CLOUDFRONT_DISTRIBUTION_ID` as an additional GitHub secret, and give the IAM user/role `cloudfront:CreateInvalidation` permission.
+
+---
+
+## Security Best Practices
+
+| Practice | Why it matters |
 |---|---|
-| `Access Denied` during sync | IAM policy doesn't include the correct bucket ARN, or bucket name typo in secrets |
-| Workflow doesn't trigger | Pushed to a branch other than `main`, or workflow file isn't in `.github/workflows/` |
-| Website shows 403 | Bucket policy not applied, or "Block Public Access" still enabled |
-| Website shows old content | Browser cache — hard refresh, or add CloudFront + cache invalidation |
+| Use least-privilege IAM policies | Limits blast radius if credentials leak |
+| Migrate to OIDC instead of static keys | Removes long-lived secrets entirely |
+| Never commit secrets to the repo | Use GitHub Secrets exclusively |
+| Restrict workflow triggers to `main` | Prevents accidental deploys from feature branches |
+| Enable branch protection on `main` | Requires PR review before code reaches production |
+| Rotate IAM access keys periodically | Reduces risk from stale credentials |
 
-_(add real issues here as you hit them)_
+### OIDC Setup (Recommended Next Step)
+
+Instead of storing AWS keys as GitHub secrets, GitHub can authenticate directly with AWS using a trust relationship:
+
+1. Create an **IAM OIDC Identity Provider** in AWS for `token.actions.githubusercontent.com`
+2. Create an **IAM Role** with a trust policy scoped to your GitHub repo/branch
+3. Replace the `configure-aws-credentials` step with:
+
+```yaml
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::YOUR_ACCOUNT_ID:role/github-actions-role
+          aws-region: ${{ secrets.AWS_REGION }}
+```
+
+4. Add `permissions: id-token: write` at the top of the workflow
+
+This eliminates the need to store `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` entirely.
 
 ---
 
-## 10. Next Steps
+## Troubleshooting
 
-- [ ] Replace IAM access keys with **OIDC** (GitHub ↔ AWS federated auth — no long-lived secrets stored at all)
-- [ ] Add **CloudFront** in front of the S3 bucket for HTTPS + CDN caching, with a cache-invalidation step in the workflow
-- [ ] Add a **staging** branch/environment that deploys to a separate test bucket before merging to `main`
-- [ ] Explore containerized deployment: Docker + ECS/EKS
-- [ ] Learn **Terraform** to provision the IAM user, S3 bucket, and bucket policy as code instead of manual console clicks
+| Issue | Likely Cause | Fix |
+|---|---|---|
+| `Access Denied` during sync | IAM policy missing permissions or wrong bucket ARN | Recheck the IAM policy resource ARNs |
+| Workflow doesn't trigger | Push was to a different branch | Confirm `branches: [main]` matches your default branch |
+| Site not updating after deploy | CloudFront caching old files | Add the cache invalidation step |
+| `NoSuchBucket` error | Bucket name typo or wrong region | Verify `S3_BUCKET_NAME` and `AWS_REGION` secrets |
+| 403 Forbidden on website URL | Bucket policy not public / Block Public Access enabled | Review Step 1 bucket policy settings |
 
 ---
 
-## 📌 Project 2: _(next project goes here)_
+**Maintained as part of personal DevOps practice documentation.**
