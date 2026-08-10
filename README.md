@@ -66,7 +66,7 @@ No manual uploads, no local AWS CLI commands — every merge to `main` becomes a
    - **Index document:** `index.html` (starting point)
    - **Error document:** `error.html` (optional but recommended)
 4. Save, and note the **Bucket website endpoint** shown — this is your live URL
-5. If you get any 403 Forbidden error **Add Bucket policy**, under **Permission → Bucket Policy → Edit* Bucket Policy allow public read access (skip this if using CloudFront with Origin Access Control instead):
+5. If you get any 403 Forbidden error **Add Bucket policy**, under **Permission → Bucket Policy → Edit* Bucket Policy allow public read access (skip this if no error):
 
 ```json
 {
