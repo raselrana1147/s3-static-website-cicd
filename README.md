@@ -59,7 +59,7 @@ No manual uploads, no local AWS CLI commands — every merge to `main` becomes a
 
 ## Step 1 — Configure the S3 Bucket
 
-1. Create S3 bucket Properties ** Any Region**
+1. Create S3 bucket Properties **Any Region**
 2. Open **S3 → your bucket → Properties**
 3. Scroll to **Static website hosting** → **Edit**
 4. Enable it, set:
