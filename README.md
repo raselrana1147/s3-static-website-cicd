@@ -59,10 +59,11 @@ No manual uploads, no local AWS CLI commands — every merge to `main` becomes a
 
 ## Step 1 — Configure the S3 Bucket
 
-1. Open **S3 → your bucket → Properties**
-2. Scroll to **Static website hosting** → **Edit**
-3. Enable it, set:
-   - **Index document:** `index.html`
+1. Create S3 bucket Properties ** Any Region**
+2. Open **S3 → your bucket → Properties**
+3. Scroll to **Static website hosting** → **Edit**
+4. Enable it, set:
+   - **Index document:** `index.html` (starting point)
    - **Error document:** `error.html` (optional but recommended)
 4. Save, and note the **Bucket website endpoint** shown — this is your live URL
 5. Under **Permissions → Bucket policy**, allow public read access (skip this if using CloudFront with Origin Access Control instead):
